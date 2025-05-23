@@ -46,8 +46,8 @@ doc_path = os.path.join(os.path.dirname(__file__), '../data/docs.txt')
 with open(doc_path, encoding='utf-8') as f:
      raw_text = f.read()
 
-# チ文単位＋最大400文字・50文字オーバーラップでチャンク化
-chunks = split_into_chunks(raw_text, max_len=400, overlap=50)
+# チャンク化
+chunks = split_into_chunks(raw_text)
 
 # 各チャンクをベクトル化（gemini用）
 embeddings = []
