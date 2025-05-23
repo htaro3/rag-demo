@@ -17,48 +17,62 @@ import chromadb
 from chromadb.config import Settings
 from dotenv import load_dotenv
 
-# .envファイル読み込んで変数に格納
-load_dotenv()
+# チャンク分割関数（文単位・最大400文字・50字オーバーラップ）
+def split_into_chunks(text, max_len=400, overlap=50):
+    sentences = re.split('(?<=。)', text)  # 「。」で文を区切る
+    chunks = []
+    current_chunk = ""
 
-# Google APIキー設定
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) <= max_len:
+            current_chunk += sentence
+        else:
+            chunks.append(current_chunk.strip())
+            # 最後のoverlap文字分だけ残して次へ
+            current_chunk = current_chunk[-overlap:] + sentence
+
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+
+# .envからAPIキー取得
+load_dotenv()
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# ドキュメント読み込み
+# docs.txt読み込み＆全体を1つの文字列として結合
 doc_path = os.path.join(os.path.dirname(__file__), '../data/docs.txt')
 with open(doc_path, encoding='utf-8') as f:
-    docs = [line.strip() for line in f if line.strip()]
+     raw_text = f.read()
+
+# チ文単位＋最大400文字・50文字オーバーラップでチャンク化
+chunks = split_into_chunks(raw_text, max_len=400, overlap=50)
 
 # 各チャンクをベクトル化（gemini用）
 embeddings = []
-for doc in docs:
-    # テキスト（チャンク）をベクトル化
+for chunk in chunks:
     result = genai.embed_content(
-        model="models/text-embedding-004",
-        content=doc,
-        task_type="retrieval_document"
+        model="models/text-embedding-004",    # 最新モデル
+        content=chunk,
+        task_type="retrieval_document"        # 文書検索向けEmbedding
     )
-    # resltの"embedding"キーにベクトルが格納されている
-    embeddings.append(result["embedding"])
+    embeddings.append(result["embedding"])    # 数値ベクトルを保存
 
-# ベクトルDBの保存ディレクトリパスを設定
+# chromadb に保存（コレクション名: rag_docs）
 db_path = os.path.join(os.path.dirname(__file__), '../data/chroma_db')
-
-# chromadbの「永続クライアント」を初期化
-client = chromadb.PersistentClient(path = db_path, settings = Settings(anonymized_telemetry = False))
-
-# コレクションrag_docsを取得
+client = chromadb.PersistentClient(path=db_path, settings=Settings(anonymized_telemetry=False))
 collection = client.get_or_create_collection("rag_docs")
 
 # 各チャンク・ベクトルを1件ずつ登録
-for idx, (doc, vector) in enumerate(zip(docs, embeddings)):
+for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
     collection.add(
-        documents = [doc],      # 元文書
-        ids = [f"doc_{idx}"],   # ユニークID
-        embeddings = [vector]   # AIが生成した意味ベクトル
+        documents=[chunk],
+        ids=[f"chunk_{idx}"],
+        embeddings=[vector]
     )
 
 # 処理完了メッセージ
 print("知識ベースのEmbedding（意味ベクトル）をベクトルDB（rag_docsコレクション）に登録しました！")
 print(f"登録件数: {len(docs)} 件")
-print("→ これで意味が似ている知識をAI検索できる下準備が完成です。")
-print("rag_docs = あなた専用の知識ベース（意味検索用インデックス）です。")
+print("✅ 分割方式：文単位・最大400文字・50文字オーバーラップ")
