@@ -2,8 +2,7 @@
 【embed.pyの役割】
 -----------------------------------------------------
 - 本ファイルは「RAG（検索拡張生成）型AIアプリ」の"準備"パート。
-- 現場業務で使いたい「ナレッジ・マニュアル・FAQ」などの知識ベース（ここではdata/docs.txt）を
-- AIが"意味（ニュアンス）で"探せるように、
+- 現場業務で使いたい「ナレッジ・マニュアル・FAQ」などの知識ベースをAIが"意味（ニュアンス）で"探せるように、
     ① テキストを小さな単位（チャンク）に分割
     ② GeminiのEmbedding APIで「意味ベクトル」に変換
     ③ ベクトルDB（chromadb）に"索引"として登録
@@ -12,67 +11,75 @@
 """
 
 import os
+import re
 import google.generativeai as genai
-import chromadb
-from chromadb.config import Settings
-from dotenv import load_dotenv
+from config import collection  # ← 初期化済みのcollectionを共通import
 
-# チャンク分割関数（文単位・最大400文字・50字オーバーラップ）
-def split_into_chunks(text, max_len=400, overlap=50):
-    sentences = re.split('(?<=。)', text)  # 「。」で文を区切る
-    chunks = []
-    current_chunk = ""
+CHUNK_SIZE = 400
+CHUNK_OVERLAP = 50
+DATA_DIR = os.path.join(os.path.dirname(__file__), '../data')
 
+## チャンク分割設定
+CHUNK_SIZE = 400
+CHUNK_OVERLAP = 50
+DATA_DIR = os.path.join(os.path.dirname(__file__), '../data')
+
+# 文単位・オーバーラップ付きチャンク分割関数
+def split_into_chunks(text, max_len=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    sentences = re.split('(?<=。)', text)
+    chunks, current = [], ""
     for sentence in sentences:
-        if len(current_chunk) + len(sentence) <= max_len:
-            current_chunk += sentence
+        if len(current) + len(sentence) <= max_len:
+            current += sentence
         else:
-            chunks.append(current_chunk.strip())
-            # 最後のoverlap文字分だけ残して次へ
-            current_chunk = current_chunk[-overlap:] + sentence
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-
+            chunks.append(current.strip())
+            current = current[-overlap:] + sentence
+    if current:
+        chunks.append(current.strip())
     return chunks
 
+# dataディレクトリ内の.txtファイル一覧取得
+txt_files = [f for f in os.listdir(DATA_DIR) if f.endswith('.txt')]
 
-# .envからAPIキー取得
-load_dotenv()
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+for file_name in txt_files:
+    document_id = file_name.replace('.txt', '')
+    file_path = os.path.join(DATA_DIR, file_name)
 
-# docs.txt読み込み＆全体を1つの文字列として結合
-doc_path = os.path.join(os.path.dirname(__file__), '../data/docs.txt')
-with open(doc_path, encoding='utf-8') as f:
-     raw_text = f.read()
+    try:
+        # 重複登録チェック（1チャンクでもあればスキップ）
+        check_id = f"{document_id}_chunk_0"
+        exists = collection.get(ids=[check_id])
+        if exists["ids"]:
+            print(f"{document_id} は既に登録済みのためスキップします。")
+            continue
 
-# チャンク化
-chunks = split_into_chunks(raw_text)
+        # テキスト読み込み＆チャンク分割
+        with open(file_path, encoding='utf-8') as f:
+            text = f.read()
+        chunks = split_into_chunks(text)
 
-# 各チャンクをベクトル化（gemini用）
-embeddings = []
-for chunk in chunks:
-    result = genai.embed_content(
-        model="models/text-embedding-004",    # 最新モデル
-        content=chunk,
-        task_type="retrieval_document"        # 文書検索向けEmbedding
-    )
-    embeddings.append(result["embedding"])    # 数値ベクトルを保存
+        # 各チャンクをembedding（ベクトル化）
+        embeddings = []
+        for chunk in chunks:
+            result = genai.embed_content(
+                model="models/text-embedding-004",
+                content=chunk,
+                task_type="retrieval_document"
+            )
+            embeddings.append(result["embedding"])
 
-# chromadb に保存（コレクション名: rag_docs）
-db_path = os.path.join(os.path.dirname(__file__), '../data/chroma_db')
-client = chromadb.PersistentClient(path=db_path, settings=Settings(anonymized_telemetry=False))
-collection = client.get_or_create_collection("rag_docs")
+        # 一括登録（documents / ids / metadatas / embeddings）
+        collection.add(
+            documents=chunks,
+            ids=[f"{document_id}_chunk_{i}" for i in range(len(chunks))],
+            metadatas=[{"document_id": document_id}] * len(chunks),
+            embeddings=embeddings
+        )
 
-# 各チャンク・ベクトルを1件ずつ登録
-for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
-    collection.add(
-        documents=[chunk],
-        ids=[f"chunk_{idx}"],
-        embeddings=[vector]
-    )
+        print(f"{file_name} のチャンク数: {len(chunks)} 件 → 登録完了")
 
-# 処理完了メッセージ
-print("知識ベースのEmbedding（意味ベクトル）をベクトルDB（rag_docsコレクション）に登録しました！")
-print(f"登録件数: {len(docs)} 件")
-print("✅ 分割方式：文単位・最大400文字・50文字オーバーラップ")
+    except Exception as e:
+        print(f"{file_name} の処理中にエラーが発生しました: {e}")
+        continue
+
+print("\n全ファイルの処理が完了しました。")

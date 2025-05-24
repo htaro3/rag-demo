@@ -16,3 +16,6 @@ ENV/
 
 # Misc
 .DS_Store 
+
+# ベクトルDB
+data/chroma_db/
